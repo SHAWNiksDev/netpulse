@@ -1,0 +1,35 @@
+# netpulse configuration
+#
+# Global defaults (each [[host]] may override interval/timeout):
+interval = 5
+timeout = 3
+history = 240      # samples kept per host for stats and the chart
+warn_ms = 300      # average latency above this marks a host as degraded
+
+# TCP probe: measures how long the handshake takes (SYN -> SYN/ACK).
+[[host]]
+name = "cloudflare-dns"
+address = "1.1.1.1"
+port = 443
+
+# The port can also live inside the address:
+[[host]]
+name = "localhost-ssh"
+address = "127.0.0.1:22"
+interval = 2
+timeout = 1
+
+# HTTP probe: follows redirects, any status < 400 counts as up.
+[[host]]
+name = "github"
+address = "github.com"
+kind = "http"
+method = "HEAD"
+
+# Pin an exact expected status if you want stricter checks:
+[[host]]
+name = "youtube"
+address = "youtube.com"
+kind = "http"
+expect_status = 200
+interval = 15
