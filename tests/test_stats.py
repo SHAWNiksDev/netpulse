@@ -83,6 +83,14 @@ def test_sparkline_maps_failures_to_zero() -> None:
     assert stats.sparkline_data == pytest.approx([10.0, 0.0, 30.0])
 
 
+def test_sparkline_treats_success_without_latency_as_zero() -> None:
+    stats = HostStats(10)
+    stats.add(make(True, 10.0))
+    stats.add(Sample(ok=True, latency=None))
+    stats.add(make(False))
+    assert stats.sparkline_data == pytest.approx([10.0, 0.0, 0.0])
+
+
 def test_uptime_pct() -> None:
     stats = HostStats(10)
     stats.add(make(True, 1.0))

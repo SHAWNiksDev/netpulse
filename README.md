@@ -33,10 +33,10 @@ No privileges, no daemons, one config file.
   blocks the others
 - Rolling window statistics: avg / min / max, jitter, loss and uptime %
 - Live sparkline of the selected host's history, with spikes highlighted
-- Sort by name, status, latency or uptime; pause, manual re-probe, config
-  reload on the fly (`R`)
+- Sort by name, status, average latency or loss; live re-sorting as statuses
+  change; pause, manual re-probe, config reload on the fly (`R`)
 - Strict TOML config with useful error messages
-- Runs anywhere Python runs, tested on 3.12–3.14
+- Tested on Linux with Python 3.12–3.14 (POSIX-oriented, no privileges needed)
 
 ## Install
 
@@ -44,7 +44,7 @@ No privileges, no daemons, one config file.
 pipx install git+https://github.com/SHAWNiksDev/netpulse.git
 # or: uv tool install git+https://github.com/SHAWNiksDev/netpulse.git
 # or the classic way:
-pip install netpulse
+pip install git+https://github.com/SHAWNiksDev/netpulse.git
 ```
 
 Or from a clone:
@@ -59,7 +59,8 @@ pip install -e .
 ## Quick start
 
 `netpulse` looks for `hosts.toml` in the current directory, then in
-`~/.config/netpulse/hosts.toml`. A minimal config:
+`~/.config/netpulse/hosts.toml` (or `$XDG_CONFIG_HOME/netpulse/hosts.toml`).
+A minimal config:
 
 ```toml
 [[host]]
@@ -96,7 +97,7 @@ Per-host keys:
 | `name`         | all        | unique label shown in the table (required)           |
 | `address`      | all        | hostname or IP (required)                            |
 | `kind`         | all        | `tcp` (default) or `http`                            |
-| `port`         | tcp        | port; may also be written as `address = "host:port"` |
+| `port`         | tcp        | port; may also be written as `address = "host:port"` or `address = "[::1]:22"` |
 | `url`          | http       | defaults to `https://<address>`                      |
 | `method`       | http       | HTTP verb, default `HEAD`                            |
 | `expect_status`| http       | pin an exact status; default: anything below 400     |
@@ -124,7 +125,7 @@ A fuller example lives in [`hosts.toml`](hosts.toml).
   counts as down.
 - **HTTP**: `HEAD` (or your method of choice) until response headers are read;
   redirects are followed. Status ≥ 400 (or a mismatched `expect_status`) counts
-  as down, but the latency is still recorded.
+  as down; failed probes are excluded from the latency statistics.
 - **Jitter** is the mean absolute difference between consecutive successful
   probes; **loss** is the share of failed probes in the window.
 
@@ -148,8 +149,8 @@ more useful question — "is the service reachable" — without any privileges.
 
 **My host shows down but ping works.**
 Something between you and the target drops SYN packets or the port is closed.
-Check the `last reply` column — refused connections, timeouts and DNS failures
-all have distinct messages.
+Select the host and check the `last reply` line in the side panel — refused
+connections, timeouts and DNS failures all have distinct messages.
 
 ## License
 

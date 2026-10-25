@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from netpulse.config import ConfigError, Host, parse_settings
+from netpulse.config import ConfigError, Host, load_settings, parse_settings
 
 
 def minimal_raw(**host_overrides) -> dict:
@@ -46,6 +46,41 @@ def test_ipv6_without_port_is_untouched(address: str) -> None:
     (host,) = settings.hosts
     assert host.address == address
     assert host.port == 22
+
+
+@pytest.mark.parametrize(
+    ("address", "expected_host", "expected_port"),
+    [("[2001:db8::1]:443", "2001:db8::1", 443), ("[::1]:22", "::1", 22)],
+)
+def test_bracketed_ipv6_with_embedded_port(address, expected_host, expected_port) -> None:
+    settings = parse_settings({"host": [{"name": "v6", "address": address}]})
+    (host,) = settings.hosts
+    assert host.address == expected_host
+    assert host.port == expected_port
+    assert host.target == address  # round-trips to the familiar notation
+
+
+def test_bracketed_ipv6_without_port_strips_brackets() -> None:
+    settings = parse_settings({"host": [{"name": "v6", "address": "[::1]", "port": 22}]})
+    (host,) = settings.hosts
+    assert host.address == "::1"
+    assert host.port == 22
+
+
+def test_bracketed_ipv6_embedded_port_conflict_rejected() -> None:
+    with pytest.raises(ConfigError, match="conflicts"):
+        parse_settings({"host": [{"name": "v6", "address": "[::1]:22", "port": 33}]})
+
+
+@pytest.mark.parametrize("address", ["[::1]:", "[::1", "[2001:db8::1]:abc"])
+def test_malformed_bracketed_address_rejected(address: str) -> None:
+    with pytest.raises(ConfigError, match="address"):
+        parse_settings({"host": [{"name": "v6", "address": address}]})
+
+
+def test_non_numeric_port_in_address_rejected() -> None:
+    with pytest.raises(ConfigError, match="invalid port"):
+        parse_settings(minimal_raw(address="example.com:ssh"))
 
 
 def test_conflicting_ports_rejected() -> None:
@@ -120,9 +155,53 @@ def test_non_positive_interval_rejected() -> None:
         parse_settings({**minimal_raw(), "interval": 0})
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_non_finite_numbers_rejected(value: float) -> None:
+    with pytest.raises(ConfigError, match="finite"):
+        parse_settings({**minimal_raw(), "interval": value})
+    with pytest.raises(ConfigError, match="finite"):
+        parse_settings({**minimal_raw(), "warn_ms": value})
+
+
+def test_boolean_port_rejected() -> None:
+    with pytest.raises(ConfigError, match="invalid port"):
+        parse_settings(minimal_raw(port=True))
+
+
+def test_float_port_rejected() -> None:
+    with pytest.raises(ConfigError, match="invalid port"):
+        parse_settings(minimal_raw(port=443.9))
+
+
+def test_unknown_http_method_rejected() -> None:
+    with pytest.raises(ConfigError, match="'method'"):
+        parse_settings(minimal_raw(kind="http", port=None, method="BREW"))
+
+
+def test_port_on_http_host_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"port.*only applies"):
+        parse_settings(minimal_raw(kind="http", port=443))
+
+
+def test_http_keys_on_tcp_host_rejected() -> None:
+    with pytest.raises(ConfigError, match="only apply"):
+        parse_settings(minimal_raw(url="https://example.com"))
+
+
+def test_unreadable_config_becomes_config_error(tmp_path) -> None:
+    config = tmp_path / "hosts.toml"
+    config.write_text('[[host]]\nname = "x"\naddress = "127.0.0.1"\nport = 1\n')
+    config.chmod(0o000)
+    try:
+        with pytest.raises(ConfigError, match="cannot read"):
+            load_settings(config)
+    finally:
+        config.chmod(0o644)
+
+
 def test_expect_status_out_of_range_rejected() -> None:
     with pytest.raises(ConfigError, match=r"expect_status.*\[100, 599\]"):
-        parse_settings(minimal_raw(kind="http", expect_status=999))
+        parse_settings(minimal_raw(kind="http", expect_status=999, port=None))
 
 
 def test_empty_name_rejected() -> None:

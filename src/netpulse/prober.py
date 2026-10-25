@@ -49,15 +49,28 @@ class Prober:
         self._running.set()
 
     async def run(self) -> None:
+        # Bootstrap only: spawn whatever is not running yet. Later changes go
+        # through apply_hosts(), which reconciles (and may cancel) tasks.
         for host in self._settings.hosts:
-            self._spawn(host)
+            if host.name not in self._tasks:
+                self._hosts[host.name] = host
+                self._spawn(host)
         await asyncio.Event().wait()
 
-    def apply_hosts(self, hosts: Iterable[Host]) -> None:
+    def apply_hosts(self, hosts: Iterable[Host], settings: Settings | None = None) -> None:
+        """Reconcile the running probe tasks with ``hosts``.
+
+        New hosts are spawned, vanished hosts are cancelled, and hosts whose
+        definition changed are respawned so they probe the updated target and
+        schedule. ``settings`` refreshes the global interval/timeout fallbacks.
+        """
+        if settings is not None:
+            self._settings = settings
         wanted = {host.name: host for host in hosts}
-        for name in list(self._tasks):
-            if name not in wanted:
-                self._tasks.pop(name).cancel()
+        for name, task in list(self._tasks.items()):
+            if name not in wanted or self._hosts.get(name) != wanted[name]:
+                self._tasks.pop(name)
+                task.cancel()
         for name, host in wanted.items():
             if name not in self._tasks:
                 self._spawn(host)
@@ -76,14 +89,18 @@ class Prober:
         return sample
 
     async def aclose(self) -> None:
-        for task in (*self._tasks.values(), *self._one_shots):
-            task.cancel()
+        tasks = (*self._tasks.values(), *self._one_shots)
         self._tasks.clear()
         self._one_shots.clear()
+        self._hosts.clear()
+        for task in tasks:
+            task.cancel()
+        # Give cancelled probes a chance to finish unwinding before the client
+        # they may still be using goes away.
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self._client.aclose()
 
     def _spawn(self, host: Host) -> None:
-        self._hosts[host.name] = host
         self._tasks[host.name] = asyncio.get_running_loop().create_task(
             self._probe_loop(host), name=f"netpulse:{host.name}"
         )
@@ -98,7 +115,9 @@ class Prober:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._on_result(host, Sample(ok=False, detail=_brief_error(exc)))
+                self._on_result(
+                    host, Sample(ok=False, detail=_brief_error(exc), at=perf_counter())
+                )
             delay = max(0.05, self.interval_for(host) - (loop.time() - started))
             await asyncio.sleep(delay)
 
@@ -106,7 +125,7 @@ class Prober:
         try:
             self._on_result(host, await self.probe_once(host))
         except Exception as exc:
-            self._on_result(host, Sample(ok=False, detail=_brief_error(exc)))
+            self._on_result(host, Sample(ok=False, detail=_brief_error(exc), at=perf_counter()))
 
     def interval_for(self, host: Host) -> float:
         return host.interval or self._settings.interval
@@ -115,7 +134,8 @@ class Prober:
         return host.timeout or self._settings.timeout
 
     async def _probe_tcp(self, host: Host) -> Sample:
-        assert host.port is not None
+        if host.port is None:
+            return Sample(ok=False, detail="tcp probe needs a port")
         start = perf_counter()
         writer: asyncio.StreamWriter | None = None
         try:
@@ -134,12 +154,21 @@ class Prober:
         start = perf_counter()
         try:
             async with asyncio.timeout(self.timeout_for(host)):
-                response = await self._client.request(host.method, host.probe_url)
-        except (httpx.HTTPError, OSError, TimeoutError) as exc:
+                # Stream so the clock stops at the response headers, matching
+                # what a probe should measure; the body is never downloaded.
+                request = self._client.build_request(
+                    host.method, host.probe_url, timeout=self.timeout_for(host)
+                )
+                response = await self._client.send(request, stream=True)
+                try:
+                    status_code = response.status_code
+                finally:
+                    await response.aclose()
+        except (httpx.HTTPError, httpx.InvalidURL, OSError, TimeoutError) as exc:
             return Sample(ok=False, detail=_brief_error(exc))
         latency = perf_counter() - start
         expected = host.expect_status
         ok = (
-            response.status_code == expected if expected is not None else response.status_code < 400
+            status_code == expected if expected is not None else status_code < 400
         )
-        return Sample(ok=ok, latency=latency, detail=str(response.status_code))
+        return Sample(ok=ok, latency=latency, detail=str(status_code))

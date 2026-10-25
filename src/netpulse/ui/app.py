@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import DataTable, Footer, Header, Label, Sparkline
+from textual.widgets.data_table import CellDoesNotExist
 
 from ..config import ConfigError, Host, Settings, load_settings
 from ..models import STATUS_DOT, STATUS_STYLE, Sample, Status
@@ -93,17 +94,18 @@ class NetPulseApp(App[None]):
 
     def on_mount(self) -> None:
         self._init_stats()
-        table = self.query_one("#hosts", DataTable)
-        for key, label, _right in _COLUMNS:
-            table.add_column(label, key=key)
         self._rebuild_table()
         self._run_prober()
         self.set_interval(1.0, self._soft_refresh)
         self._refresh_summary()
 
-    async def action_quit(self) -> None:
-        await self.prober.aclose()
+    def action_quit(self) -> None:
         self.exit()
+
+    async def on_unmount(self) -> None:
+        # Runs on every exit path — quit binding, crashes, test teardown — so
+        # probe tasks and the HTTP client never outlive the app.
+        await self.prober.aclose()
 
     def action_toggle_pause(self) -> None:
         if self.prober.paused:
@@ -126,9 +128,23 @@ class NetPulseApp(App[None]):
         except ConfigError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
+        previous_hosts = {host.name: host for host in self.settings.hosts}
+        warn_seconds = fresh.warn_ms / 1000
+        carried: dict[str, HostStats] = {}
+        if fresh.history == self.settings.history:
+            for host in fresh.hosts:
+                old = self.stats.get(host.name)
+                if old is not None and previous_hosts.get(host.name) == host:
+                    # Host unchanged: keep its rolling window across the reload.
+                    old.warn_seconds = warn_seconds
+                    carried[host.name] = old
         self.settings = fresh
-        self.prober.apply_hosts(fresh.hosts)
-        self._init_stats()
+        self.stats = {
+            host.name: carried.get(host.name) or HostStats(fresh.history, warn_seconds)
+            for host in fresh.hosts
+        }
+        self._probe_count = 0
+        self.prober.apply_hosts(fresh.hosts, settings=fresh)
         self._rebuild_table()
         self._refresh_summary()
         self.notify(f"reloaded {len(fresh.hosts)} host(s)", timeout=3)
@@ -246,7 +262,7 @@ class NetPulseApp(App[None]):
         try:
             for key, _label, _right in _COLUMNS:
                 table.update_cell(host.name, key, cells[key], update_width=True)
-        except KeyError:
+        except CellDoesNotExist:
             return  # row not present yet (e.g. probe raced a reload)
 
     def _rebuild_table(self) -> None:
@@ -303,6 +319,18 @@ class NetPulseApp(App[None]):
         self._refresh_summary()
         if self._selected is not None:
             self._refresh_side(self._selected)
+        self._resort_if_stale()
+
+    def _resort_if_stale(self) -> None:
+        # Sorting is advertised as live; re-apply it (cheap: only when the
+        # computed order actually drifted from the displayed rows).
+        table = self._table()
+        if table is None:
+            return
+        wanted = [host.name for host in self._sorted_hosts()]
+        current = [row.key.value for row in table.ordered_rows if isinstance(row.key.value, str)]
+        if current != wanted:
+            self._rebuild_table()
 
 
 __all__ = ["NetPulseApp", "ProbeUpdate"]

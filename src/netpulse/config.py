@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,9 @@ from typing import Any, Literal
 
 ProbeKind = Literal["tcp", "http"]
 _KINDS: tuple[str, ...] = ("tcp", "http")
+_HTTP_METHODS: frozenset[str] = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+)
 
 _TOP_KEYS = {"host", "interval", "timeout", "history", "warn_ms"}
 _HOST_KEYS = {
@@ -20,6 +24,7 @@ _HOST_KEYS = {
     "interval",
     "timeout",
 }
+_HTTP_ONLY_KEYS = {"url", "method", "expect_status"}
 
 _DEFAULT_INTERVAL = 5.0
 _DEFAULT_TIMEOUT = 3.0
@@ -54,7 +59,8 @@ class Host:
     def target(self) -> str:
         if self.kind == "http":
             return self.probe_url
-        return f"{self.address}:{self.port}"
+        address = f"[{self.address}]" if ":" in self.address else self.address
+        return f"{address}:{self.port}"
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,6 +83,8 @@ def load_settings(path: Path) -> Settings:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{path}: not valid UTF-8: {exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
     return parse_settings(raw)
 
 
@@ -128,6 +136,15 @@ def _parse_host(item: Any, index: int) -> Host:
     if kind not in _KINDS:
         raise ConfigError(f"'{name}': kind must be one of {_KINDS}, got {kind!r}")
 
+    if kind == "tcp":
+        misplaced = ", ".join(
+            sorted(key for key in _HTTP_ONLY_KEYS if item.get(key) is not None)
+        )
+        if misplaced:
+            raise ConfigError(f"'{name}': {misplaced} only apply to kind = \"http\" hosts")
+    elif item.get("port") is not None:
+        raise ConfigError(f"'{name}': 'port' only applies to kind = \"tcp\" hosts")
+
     port = _optional_port(item.get("port"), name)
     if kind == "tcp":
         address, embedded_port = _split_address_port(address)
@@ -138,8 +155,6 @@ def _parse_host(item: Any, index: int) -> Host:
             raise ConfigError(
                 f"'{name}': tcp probe needs a port (set 'port' or use 'address:port')"
             )
-    else:
-        port = None
 
     url: str | None = None
     method = "HEAD"
@@ -149,7 +164,7 @@ def _parse_host(item: Any, index: int) -> Host:
         if raw_url is not None and (not isinstance(raw_url, str) or not raw_url.strip()):
             raise ConfigError(f"'{name}': 'url' must be a non-empty string when set")
         url = (raw_url or f"https://{address}").strip()
-        method = str(item.get("method", "HEAD")).upper()
+        method = _http_method(item.get("method", "HEAD"), name)
         expect_status = _expect_status(item.get("expect_status"), name)
 
     return Host(
@@ -166,31 +181,46 @@ def _parse_host(item: Any, index: int) -> Host:
 
 
 def _split_address_port(address: str) -> tuple[str, int | None]:
-    # "[2001:db8::1]:443" style
-    if address.endswith("]") and "]:" in address:
-        host, _, port_part = address.rpartition("]:")
+    if address.startswith("["):  # "[2001:db8::1]:443" style
+        host, sep, port_part = address.partition("]:")
+        if not sep:
+            if address.endswith("]"):
+                return address[1:-1], None
+            raise ConfigError(f"invalid bracketed address {address!r}")
         try:
-            return host.lstrip("["), _valid_port(int(port_part))
+            return host[1:], _valid_port(int(port_part))
         except ValueError:
             raise ConfigError(f"invalid port in address {address!r}") from None
     # bare IPv6 has no embedded port
     if address.count(":") > 1 or address.endswith(":"):
         return address, None
     host, sep, port_part = address.rpartition(":")
-    if not sep or not port_part.isdigit():
+    if not sep:
         return address, None
+    if not host or not port_part.isdigit():
+        raise ConfigError(f"invalid port in address {address!r}")
     try:
         return host, _valid_port(int(port_part))
     except ValueError:
         raise ConfigError(f"invalid port in address {address!r}") from None
 
 
+def _http_method(value: Any, name: str) -> str:
+    if isinstance(value, str) and value.strip().upper() in _HTTP_METHODS:
+        return value.strip().upper()
+    raise ConfigError(
+        f"'{name}': 'method' must be one of {', '.join(sorted(_HTTP_METHODS))}, got {value!r}"
+    )
+
+
 def _optional_port(value: Any, name: str) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"'{name}': invalid port {value!r}")
     try:
-        return _valid_port(int(value))
-    except (TypeError, ValueError) as exc:
+        return _valid_port(value)
+    except ValueError as exc:
         raise ConfigError(f"'{name}': invalid port {value!r}") from exc
 
 
@@ -224,7 +254,10 @@ def _positive_or_none(value: Any, name: str) -> float | None:
 def _as_number(value: Any, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"'{key}' must be a number, got {value!r}")
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ConfigError(f"'{key}' must be a finite number, got {value!r}")
+    return number
 
 
 def _bounded_int(value: Any, key: str, low: int) -> int:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "netpulse"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Async TUI dashboard that watches hosts over TCP and HTTP probes"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,6 +31,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
 ]
+tools = [
+    "cairosvg>=2.7",
+    "Pillow>=10",
+]
 
 [project.scripts]
 netpulse = "netpulse.cli:main"
@@ -38,6 +42,9 @@ netpulse = "netpulse.cli:main"
 [project.urls]
 Homepage = "https://github.com/SHAWNiksDev/netpulse"
 Issues = "https://github.com/SHAWNiksDev/netpulse/issues"
+
+[tool.hatch.version]
+path = "src/netpulse/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/netpulse"]

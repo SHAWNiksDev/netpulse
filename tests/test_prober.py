@@ -156,6 +156,58 @@ async def test_apply_hosts_adds_and_removes_loops(tcp_listener: int) -> None:
     assert received.count("b") > 0
 
 
+async def test_apply_hosts_respawns_redefined_host(closed_port: int, tcp_listener: int) -> None:
+    received: list[Sample] = []
+    prober = Prober(make_settings(interval=0.05), lambda host, sample: received.append(sample))
+    try:
+        prober.apply_hosts([tcp_host(closed_port, name="target")])
+        await asyncio.sleep(0.15)
+        assert received and not any(s.ok for s in received)
+
+        # same name, new port: the running loop must switch to the new target
+        prober.apply_hosts([tcp_host(tcp_listener, name="target")])
+        received.clear()
+        await asyncio.sleep(0.25)
+        assert received and any(s.ok for s in received)
+    finally:
+        await prober.aclose()
+
+
+async def test_apply_hosts_refreshes_global_settings() -> None:
+    prober = Prober(make_settings(interval=5.0, timeout=1.0), lambda host, sample: None)
+    try:
+        host = tcp_host(1)
+        assert prober.interval_for(host) == 5.0
+        assert prober.timeout_for(host) == 1.0
+        prober.apply_hosts([host], settings=make_settings(interval=0.5, timeout=4.0))
+        assert prober.interval_for(host) == 0.5
+        assert prober.timeout_for(host) == 4.0
+        # per-host overrides still win over the refreshed globals
+        assert prober.timeout_for(tcp_host(1, timeout=9.0)) == 9.0
+    finally:
+        await prober.aclose()
+
+
+async def test_tcp_probe_without_port_fails_gracefully() -> None:
+    prober = Prober(make_settings(), lambda host, sample: None)
+    try:
+        sample = await prober.probe_once(Host(name="p", address="127.0.0.1", kind="tcp"))
+        assert not sample.ok
+        assert "port" in sample.detail
+    finally:
+        await prober.aclose()
+
+
+async def test_http_probe_returns_sample_for_unusable_url() -> None:
+    prober = Prober(make_settings(), lambda host, sample: None)
+    try:
+        sample = await prober.probe_once(Host(name="bad", address="", kind="http"))
+        assert not sample.ok
+        assert sample.detail  # reason present, no exception escaped
+    finally:
+        await prober.aclose()
+
+
 async def test_pause_gates_the_schedule_but_not_pokes(tcp_listener: int) -> None:
     received: list[Sample] = []
     prober = Prober(

@@ -39,7 +39,10 @@ class HostStats:
 
     @property
     def sparkline_data(self) -> list[float]:
-        return [s.latency * 1000 if s.ok else 0.0 for s in self._window]
+        return [
+            s.latency * 1000 if s.ok and s.latency is not None else 0.0
+            for s in self._window
+        ]
 
     @property
     def last(self) -> Sample | None:

@@ -51,7 +51,9 @@ class SummaryBar(Static):
 
 
 class DetailPane(Static):
-    def __init__(self, *, id=None, classes=None):
+    def __init__(
+        self, *, id: str | None = None, classes: str | None = None
+    ) -> None:
         super().__init__(id=id, classes=classes)
         self._host: Host | None = None
         self._stats: HostStats | None = None
@@ -84,10 +86,13 @@ class DetailPane(Static):
         status = stats.status
 
         header = Text.assemble((host.name, "bold"), "\n", (host.target, "dim italic"))
+        interval = self._interval if self._interval is not None else 5.0
+        timeout = self._timeout if self._timeout is not None else 3.0
         badge = Text.from_markup(
             f"[{STATUS_STYLE[status]}]{status.value.upper()}[/]"
             f" [dim]· {host.kind}[/]"
-            f" [dim]· every {self.interval_for(host):g}s[/]"
+            f" [dim]· every {interval:g}s[/]"
+            f" [dim]· timeout {timeout:g}s[/]"
         )
 
         lines: list[Text | str] = [header, Text(), badge, Text()]
@@ -96,18 +101,18 @@ class DetailPane(Static):
             lines.append(Text("no samples yet", style="dim italic"))
         else:
             outcome = (
-                f"{last.latency * 1000:.1f} ms"
+                fmt_ms(last.latency * 1000)
                 if last.ok and last.latency is not None
                 else "failed"
             )
             lines.append(
                 Text.assemble(
-                    ("last probe  ", "dim"),
+                    (f"{'last probe':<12}", "dim"),
                     (outcome, STATUS_STYLE[status] if last.ok else "red"),
                 )
             )
             if last.detail:
-                lines.append(Text.assemble(("last reply   ", "dim"), last.detail))
+                lines.append(Text.assemble((f"{'last reply':<12}", "dim"), last.detail))
         lines.append(Text())
 
         rows = [
@@ -120,11 +125,8 @@ class DetailPane(Static):
             ("samples", str(stats.attempts)),
         ]
         for label, value in rows:
-            lines.append(Text.assemble((f"{label:<10}", "dim"), value))
+            lines.append(Text.assemble((f"{label:<12}", "dim"), value))
         return Text("\n").join(lines)
-
-    def interval_for(self, host: Host) -> float:
-        return self._interval or 5.0
 
 
 HELP_TEXT = """\

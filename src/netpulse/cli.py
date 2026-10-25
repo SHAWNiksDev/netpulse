@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -8,10 +9,13 @@ from . import __version__
 from .config import ConfigError, load_settings
 from .ui.app import NetPulseApp
 
-DEFAULT_CONFIGS = (
-    Path("hosts.toml"),
-    Path.home() / ".config" / "netpulse" / "hosts.toml",
-)
+
+def _default_configs() -> tuple[Path, ...]:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return (Path("hosts.toml"), config_home / "netpulse" / "hosts.toml")
+
+
+DEFAULT_CONFIGS = _default_configs()
 
 
 def build_parser() -> argparse.ArgumentParser:
