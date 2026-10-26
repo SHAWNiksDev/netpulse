@@ -7,8 +7,8 @@ from time import monotonic
 from textual.widgets import DataTable
 
 from netpulse.config import Host, Settings, load_settings
-from netpulse.models import Status
-from netpulse.ui.app import NetPulseApp
+from netpulse.models import Sample, Status
+from netpulse.ui.app import NetPulseApp, ProbeUpdate
 
 
 async def wait_for(pilot, predicate, timeout: float = 4.0) -> None:
@@ -265,3 +265,44 @@ async def test_reload_with_broken_config_keeps_running(tmp_path: Path) -> None:
         # still the old settings, app alive and probing
         assert [h.name for h in app.settings.hosts] == ["one"]
         assert app.is_running
+
+
+async def test_reload_ignores_queued_result_from_previous_target(tmp_path: Path) -> None:
+    config_path = tmp_path / "hosts.toml"
+    config_path.write_text('[[host]]\nname = "one"\naddress = "127.0.0.1"\nport = 1\n')
+    settings = load_settings(config_path)
+    old_host = settings.hosts[0]
+    app = NetPulseApp(settings, config_path=config_path)
+    app.prober.pause()
+    async with app.run_test(size=(110, 32)):
+        config_path.write_text('[[host]]\nname = "one"\naddress = "127.0.0.1"\nport = 2\n')
+        app.action_reload()
+        app.on_probe_update(ProbeUpdate(old_host, Sample(ok=True, latency=0.01)))
+        assert app.stats["one"].status is Status.PENDING
+        assert app.stats["one"].attempts == 0
+        assert app._probe_count == 0
+
+
+async def test_reload_resizes_history_without_discarding_recent_samples(tmp_path: Path) -> None:
+    config_path = tmp_path / "hosts.toml"
+    config = '[[host]]\nname = "one"\naddress = "127.0.0.1"\nport = 1\n'
+    config_path.write_text("history = 20\n" + config)
+    settings = load_settings(config_path)
+    app = NetPulseApp(settings, config_path=config_path)
+    app.prober.pause()
+    async with app.run_test(size=(110, 32)):
+        for i in range(15):
+            app.on_probe_update(ProbeUpdate(settings.hosts[0], Sample(ok=True, latency=i / 1000)))
+        config_path.write_text("history = 10\nwarn_ms = 1\n" + config)
+        app.action_reload()
+        window = app.stats["one"]
+        assert window.attempts == 10
+        assert window.min_ms == 5
+        assert window.max_ms == 14
+        assert window.status is Status.DEGRADED
+        assert app._probe_count == 15
+
+        # The unchanged loop still owns the original, equal Host instance.
+        app.on_probe_update(ProbeUpdate(settings.hosts[0], Sample(ok=True, latency=0.02)))
+        assert window.attempts == 10
+        assert window.max_ms == 20

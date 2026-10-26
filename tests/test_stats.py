@@ -110,3 +110,24 @@ def test_clear_resets_everything() -> None:
 def test_zero_size_window_rejected() -> None:
     with pytest.raises(ValueError):
         HostStats(0)
+
+
+def test_resize_keeps_newest_samples_and_updates_capacity() -> None:
+    stats = HostStats(5)
+    for i in range(5):
+        stats.add(make(True, i))
+    stats.resize(2)
+    assert stats.sparkline_data == [3, 4]
+    stats.resize(4)
+    stats.add(make(False))
+    stats.add(make(True, 5))
+    assert stats.sparkline_data == [3, 4, 0, 5]
+    assert stats.attempts == 4
+
+
+def test_resize_rejects_empty_window_without_losing_history() -> None:
+    stats = HostStats(5)
+    stats.add(make(True, 10))
+    with pytest.raises(ValueError, match="window size"):
+        stats.resize(0)
+    assert stats.sparkline_data == [10]

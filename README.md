@@ -77,6 +77,7 @@ kind = "http"
 ```sh
 netpulse                 # uses ./hosts.toml
 netpulse -c ~/my.toml    # explicit path
+netpulse --check        # validate the config without opening the dashboard or probing
 ```
 
 ## Configuration
@@ -105,6 +106,15 @@ Per-host keys:
 | `timeout`      | all        | per-host override                                    |
 
 A fuller example lives in [`hosts.toml`](hosts.toml).
+
+HTTP URLs must use `http://` or `https://` and include a hostname or IP.
+For IPv6, `address = "::1"` defaults to `https://[::1]`; explicit URLs need
+brackets too, for example `url = "http://[::1]:8080/health"`.
+
+After editing the config, press `R` to apply it. Interval and timeout changes
+take effect immediately. Unchanged hosts keep their measurements, including
+the most recent samples when `history` is resized; changed targets start fresh.
+The probe counter tracks the whole session and survives reloads.
 
 ## Keys
 

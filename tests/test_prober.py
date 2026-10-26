@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from netpulse.config import Host, Settings
@@ -239,3 +240,135 @@ async def test_pause_gates_the_schedule_but_not_pokes(tcp_listener: int) -> None
             await runner
 
     assert prober.paused is False
+
+
+async def test_reload_applies_shorter_interval_without_waiting_for_old_sleep(
+    tcp_listener: int,
+) -> None:
+    received: list[Sample] = []
+    first = asyncio.Event()
+    second = asyncio.Event()
+
+    def report(host: Host, sample: Sample) -> None:
+        received.append(sample)
+        (first if len(received) == 1 else second).set()
+
+    host = tcp_host(tcp_listener)
+    prober = Prober(make_settings(interval=30), report)
+    try:
+        prober.apply_hosts([host])
+        await asyncio.wait_for(first.wait(), 1)
+        prober.apply_hosts([host], settings=make_settings(interval=0.05))
+        await asyncio.wait_for(second.wait(), 1)
+    finally:
+        await prober.aclose()
+
+
+async def test_reload_cancels_manual_probe_for_changed_host(monkeypatch) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_probe(host: Host) -> Sample:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    old = tcp_host(1)
+    prober = Prober(make_settings(), lambda host, sample: None)
+    monkeypatch.setattr(prober, "probe_once", slow_probe)
+    prober.pause()
+    try:
+        prober.apply_hosts([old])
+        prober.poke(old)
+        await asyncio.wait_for(started.wait(), 1)
+        prober.apply_hosts([tcp_host(2)])
+        await asyncio.wait_for(cancelled.wait(), 1)
+    finally:
+        await prober.aclose()
+
+
+async def test_close_waits_for_cleanup_of_removed_probe(monkeypatch) -> None:
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def slow_probe(host: Host) -> Sample:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            cleaned.set()
+
+    prober = Prober(make_settings(), lambda host, sample: None)
+    monkeypatch.setattr(prober, "probe_once", slow_probe)
+    closer = None
+    try:
+        prober.apply_hosts([tcp_host(1)])
+        await asyncio.wait_for(started.wait(), 1)
+        prober.apply_hosts([])
+        await asyncio.wait_for(cleaning.wait(), 1)
+        closer = asyncio.create_task(prober.aclose())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(closer, 1)
+        assert cleaned.is_set()
+    finally:
+        release.set()
+        if closer is not None:
+            await closer
+        await prober.aclose()
+
+
+async def test_http_latency_stops_before_response_cleanup(monkeypatch) -> None:
+    clock = 100.0
+
+    class ResponseBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise AssertionError("probe must not read the response body")
+            yield b""  # pragma: no cover
+
+        async def aclose(self) -> None:
+            nonlocal clock
+            clock += 1
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal clock
+        clock += 0.02
+        return httpx.Response(200, stream=ResponseBody())
+
+    prober = Prober(make_settings(), lambda host, sample: None)
+    await prober._client.aclose()
+    prober._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr("netpulse.prober.perf_counter", lambda: clock)
+    try:
+        sample = await prober.probe_once(http_host(80))
+        assert sample.ok
+        assert sample.latency == pytest.approx(0.02)
+    finally:
+        await prober.aclose()
+
+
+async def test_repeated_pokes_share_one_pending_manual_probe(monkeypatch) -> None:
+    calls = 0
+    started = asyncio.Event()
+
+    async def slow_probe(host: Host) -> Sample:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await asyncio.Event().wait()
+
+    prober = Prober(make_settings(), lambda host, sample: None)
+    monkeypatch.setattr(prober, "probe_once", slow_probe)
+    try:
+        for _ in range(10):
+            prober.poke(tcp_host(1))
+        await asyncio.wait_for(started.wait(), 1)
+        assert calls == 1
+    finally:
+        await prober.aclose()

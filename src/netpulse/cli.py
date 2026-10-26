@@ -31,6 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to hosts.toml (default: ./hosts.toml, then ~/.config/netpulse/hosts.toml)",
     )
     parser.add_argument("--version", action="version", version=f"netpulse {__version__}")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate configuration and exit without starting the dashboard",
+    )
     return parser
 
 
@@ -46,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"netpulse: {exc}", file=sys.stderr)
         return 2
+
+    if args.check:
+        count = len(settings.hosts)
+        label = "host" if count == 1 else "hosts"
+        print(f"netpulse: {config_path}: configuration OK ({count} {label})")
+        return 0
 
     NetPulseApp(settings, config_path=config_path).run()
     return 0

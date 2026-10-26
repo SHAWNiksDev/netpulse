@@ -34,7 +34,8 @@ class Prober:
         )
         self._hosts: dict[str, Host] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._one_shots: set[asyncio.Task[None]] = set()
+        self._one_shots: dict[Host, asyncio.Task[None]] = {}
+        self._active_tasks: set[asyncio.Task[None]] = set()
         self._running = asyncio.Event()
         self._running.set()
 
@@ -64,13 +65,27 @@ class Prober:
         definition changed are respawned so they probe the updated target and
         schedule. ``settings`` refreshes the global interval/timeout fallbacks.
         """
-        if settings is not None:
-            self._settings = settings
+        fresh = settings if settings is not None else self._settings
         wanted = {host.name: host for host in hosts}
+
+        def changed(host: Host) -> bool:
+            new = wanted.get(host.name)
+            if new is None or new != host:
+                return True
+            return (
+                self.interval_for(host) != (new.interval or fresh.interval)
+                or self.timeout_for(host) != (new.timeout or fresh.timeout)
+            )
+
         for name, task in list(self._tasks.items()):
-            if name not in wanted or self._hosts.get(name) != wanted[name]:
+            if changed(self._hosts[name]):
                 self._tasks.pop(name)
-                task.cancel()
+                self._cancel(task)
+        for host, task in list(self._one_shots.items()):
+            if changed(host):
+                self._one_shots.pop(host)
+                self._cancel(task)
+        self._settings = fresh
         for name, host in wanted.items():
             if name not in self._tasks:
                 self._spawn(host)
@@ -78,9 +93,17 @@ class Prober:
 
     def poke(self, host: Host) -> None:
         """Run an immediate one-off probe outside of the regular schedule."""
+        if host in self._one_shots:
+            return
         task = asyncio.get_running_loop().create_task(self._probe_and_report(host))
-        self._one_shots.add(task)
-        task.add_done_callback(self._one_shots.discard)
+        self._one_shots[host] = task
+        self._track(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            if self._one_shots.get(host) is done:
+                self._one_shots.pop(host)
+
+        task.add_done_callback(finished)
 
     async def probe_once(self, host: Host) -> Sample:
         stamp = perf_counter()
@@ -89,21 +112,34 @@ class Prober:
         return sample
 
     async def aclose(self) -> None:
-        tasks = (*self._tasks.values(), *self._one_shots)
+        tasks = tuple(self._active_tasks)
         self._tasks.clear()
         self._one_shots.clear()
         self._hosts.clear()
         for task in tasks:
-            task.cancel()
+            self._cancel(task)
         # Give cancelled probes a chance to finish unwinding before the client
         # they may still be using goes away.
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._client.aclose()
 
     def _spawn(self, host: Host) -> None:
-        self._tasks[host.name] = asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             self._probe_loop(host), name=f"netpulse:{host.name}"
         )
+        self._tasks[host.name] = task
+        self._track(task)
+
+    def _track(self, task: asyncio.Task[None]) -> None:
+        # Removed tasks remain tracked until their cancellation cleanup finishes.
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
+
+    @staticmethod
+    def _cancel(task: asyncio.Task[None]) -> None:
+        # A second cancel would interrupt cleanup that is already in progress.
+        if not task.cancelling():
+            task.cancel()
 
     async def _probe_loop(self, host: Host) -> None:
         loop = asyncio.get_running_loop()
@@ -160,13 +196,13 @@ class Prober:
                     host.method, host.probe_url, timeout=self.timeout_for(host)
                 )
                 response = await self._client.send(request, stream=True)
+                latency = perf_counter() - start
                 try:
                     status_code = response.status_code
                 finally:
                     await response.aclose()
         except (httpx.HTTPError, httpx.InvalidURL, OSError, TimeoutError) as exc:
             return Sample(ok=False, detail=_brief_error(exc))
-        latency = perf_counter() - start
         expected = host.expect_status
         ok = (
             status_code == expected if expected is not None else status_code < 400

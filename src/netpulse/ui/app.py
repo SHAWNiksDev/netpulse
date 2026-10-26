@@ -131,19 +131,17 @@ class NetPulseApp(App[None]):
         previous_hosts = {host.name: host for host in self.settings.hosts}
         warn_seconds = fresh.warn_ms / 1000
         carried: dict[str, HostStats] = {}
-        if fresh.history == self.settings.history:
-            for host in fresh.hosts:
-                old = self.stats.get(host.name)
-                if old is not None and previous_hosts.get(host.name) == host:
-                    # Host unchanged: keep its rolling window across the reload.
-                    old.warn_seconds = warn_seconds
-                    carried[host.name] = old
+        for host in fresh.hosts:
+            old = self.stats.get(host.name)
+            if old is not None and previous_hosts.get(host.name) == host:
+                old.resize(fresh.history)
+                old.warn_seconds = warn_seconds
+                carried[host.name] = old
         self.settings = fresh
         self.stats = {
             host.name: carried.get(host.name) or HostStats(fresh.history, warn_seconds)
             for host in fresh.hosts
         }
-        self._probe_count = 0
         self.prober.apply_hosts(fresh.hosts, settings=fresh)
         self._rebuild_table()
         self._refresh_summary()
@@ -171,7 +169,8 @@ class NetPulseApp(App[None]):
 
     def on_probe_update(self, event: ProbeUpdate) -> None:
         window = self.stats.get(event.host.name)
-        if window is None:  # host was removed between scheduling and delivery
+        if window is None or self._host_by_name(event.host.name) != event.host:
+            # A queued result may belong to a removed or redefined target.
             return
         window.add(event.sample)
         self._probe_count += 1

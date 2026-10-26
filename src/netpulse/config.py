@@ -3,8 +3,11 @@ from __future__ import annotations
 import math
 import tomllib
 from dataclasses import dataclass
+from ipaddress import IPv6Address
 from pathlib import Path
 from typing import Any, Literal
+
+import httpx
 
 ProbeKind = Literal["tcp", "http"]
 _KINDS: tuple[str, ...] = ("tcp", "http")
@@ -53,7 +56,7 @@ class Host:
         """Full URL for http probes, derived from address when not set."""
         if self.kind != "http":
             return ""
-        return self.url or f"https://{self.address}"
+        return self.url or _default_http_url(self.address)
 
     @property
     def target(self) -> str:
@@ -163,7 +166,8 @@ def _parse_host(item: Any, index: int) -> Host:
         raw_url = item.get("url")
         if raw_url is not None and (not isinstance(raw_url, str) or not raw_url.strip()):
             raise ConfigError(f"'{name}': 'url' must be a non-empty string when set")
-        url = (raw_url or f"https://{address}").strip()
+        url = (raw_url or _default_http_url(address)).strip()
+        _validate_http_url(url, name)
         method = _http_method(item.get("method", "HEAD"), name)
         expect_status = _expect_status(item.get("expect_status"), name)
 
@@ -181,19 +185,30 @@ def _parse_host(item: Any, index: int) -> Host:
 
 
 def _split_address_port(address: str) -> tuple[str, int | None]:
+    if any(c.isspace() or ord(c) < 32 or c in "/\\?#@" for c in address):
+        raise ConfigError(f"invalid TCP address {address!r}; use a hostname or IP")
     if address.startswith("["):  # "[2001:db8::1]:443" style
-        host, sep, port_part = address.partition("]:")
-        if not sep:
-            if address.endswith("]"):
-                return address[1:-1], None
-            raise ConfigError(f"invalid bracketed address {address!r}")
+        host, sep, suffix = address[1:].partition("]")
         try:
-            return host[1:], _valid_port(int(port_part))
+            IPv6Address(host)
+            if not sep:
+                raise ValueError("missing closing bracket")
+            if not suffix:
+                return host, None
+            if not suffix.startswith(":") or not suffix[1:].isascii() or not suffix[1:].isdigit():
+                raise ValueError("invalid port")
+            return host, _valid_port(int(suffix[1:]))
         except ValueError:
-            raise ConfigError(f"invalid port in address {address!r}") from None
+            raise ConfigError(f"invalid bracketed address {address!r}") from None
     # bare IPv6 has no embedded port
-    if address.count(":") > 1 or address.endswith(":"):
+    if address.count(":") > 1:
+        try:
+            IPv6Address(address)
+        except ValueError:
+            raise ConfigError(f"invalid IPv6 address {address!r}") from None
         return address, None
+    if "[" in address or "]" in address:
+        raise ConfigError(f"invalid address {address!r}")
     host, sep, port_part = address.rpartition(":")
     if not sep:
         return address, None
@@ -203,6 +218,27 @@ def _split_address_port(address: str) -> tuple[str, int | None]:
         return host, _valid_port(int(port_part))
     except ValueError:
         raise ConfigError(f"invalid port in address {address!r}") from None
+
+
+def _default_http_url(address: str) -> str:
+    try:
+        IPv6Address(address)
+    except ValueError:
+        return f"https://{address}"
+    return f"https://[{address}]"
+
+
+def _validate_http_url(value: str, name: str) -> None:
+    try:
+        url = httpx.URL(value)
+        if url.scheme not in {"http", "https"} or not url.host:
+            raise ValueError("expected an absolute http:// or https:// URL")
+        if any(c.isspace() for c in url.host):
+            raise ValueError("hostname contains whitespace")
+        if url.port is not None:
+            _valid_port(url.port)
+    except (httpx.InvalidURL, ValueError) as exc:
+        raise ConfigError(f"'{name}': invalid 'url': {exc}") from exc
 
 
 def _http_method(value: Any, name: str) -> str:
@@ -254,7 +290,10 @@ def _positive_or_none(value: Any, name: str) -> float | None:
 def _as_number(value: Any, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"'{key}' must be a number, got {value!r}")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ConfigError(f"'{key}' must be a finite number") from exc
     if not math.isfinite(number):
         raise ConfigError(f"'{key}' must be a finite number, got {value!r}")
     return number

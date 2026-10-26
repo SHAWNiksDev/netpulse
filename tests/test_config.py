@@ -212,3 +212,28 @@ def test_empty_name_rejected() -> None:
 def test_no_hosts_rejected() -> None:
     with pytest.raises(ConfigError, match=r"no \[\[host\]\] entries"):
         parse_settings({})
+
+
+@pytest.mark.parametrize("address", ["[]", "[]:22", "example.com:", "[no-ip]:22", "::oops"])
+def test_invalid_tcp_addresses_rejected(address: str) -> None:
+    with pytest.raises(ConfigError, match="address"):
+        parse_settings(minimal_raw(address=address, port=22))
+
+
+@pytest.mark.parametrize(
+    "url", ["ftp://example.com", "https://", "https://[::1", "https://example.com:70000"]
+)
+def test_invalid_http_urls_rejected(url: str) -> None:
+    with pytest.raises(ConfigError, match="url"):
+        parse_settings(minimal_raw(kind="http", port=None, url=url))
+
+
+def test_http_ipv6_address_gets_bracketed_url() -> None:
+    settings = parse_settings(minimal_raw(kind="http", port=None, address="::1"))
+    assert settings.hosts[0].probe_url == "https://[::1]"
+    assert Host(name="v6", address="::1", kind="http").probe_url == "https://[::1]"
+
+
+def test_oversized_number_reports_config_error() -> None:
+    with pytest.raises(ConfigError, match="finite"):
+        parse_settings({**minimal_raw(), "interval": 10**1000})
