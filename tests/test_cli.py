@@ -47,3 +47,27 @@ def test_fallback_picks_first_existing_config(tmp_path: Path, monkeypatch, capsy
     # the reported error comes from the fallback file, proving it was chosen
     assert cli.main([]) == 2
     assert "bogus" in capsys.readouterr().err
+
+
+def test_check_validates_config_without_starting_app(tmp_path: Path, monkeypatch, capsys) -> None:
+    config = tmp_path / "hosts.toml"
+    config.write_text('[[host]]\nname = "local"\naddress = "127.0.0.1"\nport = 80\n')
+
+    def unexpected_app(*args, **kwargs):
+        pytest.fail("--check must not start the dashboard or probe any hosts")
+
+    monkeypatch.setattr(cli, "NetPulseApp", unexpected_app)
+    assert cli.main(["--check", "-c", str(config)]) == 0
+    assert "configuration OK (1 host)" in capsys.readouterr().out
+
+
+def test_check_returns_config_error_for_invalid_url(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "hosts.toml"
+    config.write_text(
+        '[[host]]\nname = "bad"\naddress = "example.com"\nkind = "http"\n'
+        'url = "ftp://example.com"\n'
+    )
+    assert cli.main(["--check", "-c", str(config)]) == 2
+    captured = capsys.readouterr()
+    assert "invalid 'url'" in captured.err
+    assert not captured.out

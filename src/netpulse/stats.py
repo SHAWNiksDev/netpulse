@@ -22,6 +22,13 @@ class HostStats:
     def clear(self) -> None:
         self._window.clear()
 
+    def resize(self, size: int) -> None:
+        """Change the window capacity, keeping the most recent samples."""
+        if size < 1:
+            raise ValueError("window size must be >= 1")
+        if self._window.maxlen != size:
+            self._window = deque(self._window, maxlen=size)
+
     @property
     def attempts(self) -> int:
         return len(self._window)
